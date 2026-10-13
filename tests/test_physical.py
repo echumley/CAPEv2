@@ -85,7 +85,9 @@ def physical_module(monkeypatch: pytest.MonkeyPatch):
     return module
 
 def make_machinery(physical_module, restore_timeout=600):
+    # Skips __init__, which opens CAPE's database: its state is set here instead.
     machinery = physical_module.Physical.__new__(physical_module.Physical)
+    machinery.unrestored = set()
     machinery.options = SimpleNamespace(
         physical=SimpleNamespace(type="pure", restore_timeout=restore_timeout),
         fog=SimpleNamespace(hostname=FOG, apikey="a", user_apikey="b"),
@@ -156,6 +158,27 @@ def test_stop_restores_a_machine_whose_agent_is_gone(physical_module, mocker: Mo
     assert network.deploys == [(7, DEPLOY)]
     assert network.executes == []
     wake.assert_called_once_with("bm-linux")
+
+def test_start_refuses_a_machine_that_was_not_restored(physical_module, mocker: MockerFixture):
+    network = FakeNetwork(agent=[True], deploy_status=500)
+    install(physical_module, mocker, network)
+    machinery = make_machinery(physical_module)
+
+    with pytest.raises(CuckooMachineError, match="FOG refused"):
+        machinery.stop("bm-linux")
+    # CAPE releases the machine anyway, and its agent still answers.
+    with pytest.raises(CuckooMachineError, match="bm-linux has not been restored since its last analysis"):
+        machinery.start("bm-linux")
+
+def test_start_accepts_a_restored_machine(physical_module, mocker: MockerFixture):
+    network = FakeNetwork(agent=[True, False, True])
+    install(physical_module, mocker, network)
+    machinery = make_machinery(physical_module)
+
+    machinery.stop("bm-linux")
+    machinery.start("bm-linux")
+
+    assert machinery.unrestored == set()
 
 def test_stop_rejects_machines_missing_from_fog(physical_module, mocker: MockerFixture):
     network = FakeNetwork(agent=[True])

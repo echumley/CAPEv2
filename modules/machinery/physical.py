@@ -29,6 +29,7 @@ HTTP_TIMEOUT = 10
 # reboot into the restored system before the machine is reported as broken.
 RESTORE_TIMEOUT = 1800
 
+
 class Physical(Machinery):
     """Manage physical sandboxes."""
 
@@ -40,6 +41,11 @@ class Physical(Machinery):
     ERROR = "error"
 
     headers = {}
+
+    def __init__(self):
+        super().__init__()
+        # Machines whose FOG restore has not completed since their last analysis.
+        self.unrestored = set()
 
     def _initialize_check(self):
         """Ensure that credentials have been entered into the config file.
@@ -97,8 +103,17 @@ class Physical(Machinery):
         """Start a physical machine.
         @param label: physical machine name.
         @param task: task object.
-        @raise CuckooMachineError: if unable to start.
+        @raise CuckooMachineError: if unable to start, or if the machine has not
+            been restored since its last analysis.
         """
+        # CAPE releases a machine even when stop() fails, and running the next
+        # sample on the previous one's system would taint both reports.
+        if label in self.unrestored:
+            raise CuckooMachineError(
+                f"Physical machine {label} has not been restored since its last analysis. "
+                "Check its FOG restore, then restart CAPE to use it again"
+            )
+
         # Check to ensure a given machine is running
         log.debug("Checking if machine %s is running", label)
         status = self._status(label)
@@ -113,9 +128,11 @@ class Physical(Machinery):
         """Restore a physical machine with FOG and wait until it is back.
         @param label: physical machine name.
         @raise CuckooMachineError: if FOG cannot restore the machine, or it does
-            not come back within [physical] restore_timeout seconds.
+            not come back within [physical] restore_timeout seconds. start()
+            then refuses the machine.
         """
         machine = self._get_machine(label)
+        self.unrestored.add(label)
         hostID = self._fog_host_id(label)
 
         # Deploy Task to reset physical machine to former state. FOG runs it on the
@@ -151,6 +168,8 @@ class Physical(Machinery):
                 raise CuckooMachineError(f"Physical machine {label} did not come back within {timeout} seconds of its FOG restore")
             log.debug("Machine not reachable yet after reset")
             time.sleep(3)
+
+        self.unrestored.discard(label)
 
     def _fog_host_id(self, label):
         """Return FOG's ID for a machine; FOG host names are the machine labels."""

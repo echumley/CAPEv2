@@ -172,20 +172,28 @@ class Physical(Machinery):
 
     def _fog_host_id(self, label):
         """Return FOG's ID for a machine; FOG host names are the machine labels."""
-        r_hosts = requests.get(f"http://{self.options.fog.hostname}/fog/host", headers=headers, timeout=HTTP_TIMEOUT)
-        for host in r_hosts.json()["hosts"]:
+        # Machine errors, not request errors: CAPE then keeps the analysis's report.
+        try:
+            r_hosts = requests.get(f"http://{self.options.fog.hostname}/fog/host", headers=headers, timeout=HTTP_TIMEOUT)
+            hosts = r_hosts.json()["hosts"]
+        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+            raise CuckooMachineError(f"Could not list FOG's hosts: {e!r}") from e
+        for host in hosts:
             if host["name"] == label:
                 return host["id"]
         raise CuckooMachineError(f"The physical machine {label} has not been defined in FOG")
 
     def _queue_deploy(self, hostID):
         """Queue FOG's Deploy task, which restores the machine's image on its next network boot."""
-        r_types = requests.get(f"http://{self.options.fog.hostname}/fog/tasktype", headers=headers, timeout=HTTP_TIMEOUT)
-        taskID_Deploy = next((t["id"] for t in r_types.json()["tasktypes"] if t["name"] == "Deploy"), 0)
-        payload = json.dumps({"taskTypeID": taskID_Deploy, "shutdown": "", "wol": "true"}).encode()
-        r = requests.post(
-            f"http://{self.options.fog.hostname}/fog/host/{hostID}/task", headers=headers, data=payload, timeout=HTTP_TIMEOUT
-        )
+        try:
+            r_types = requests.get(f"http://{self.options.fog.hostname}/fog/tasktype", headers=headers, timeout=HTTP_TIMEOUT)
+            taskID_Deploy = next((t["id"] for t in r_types.json()["tasktypes"] if t["name"] == "Deploy"), 0)
+            payload = json.dumps({"taskTypeID": taskID_Deploy, "shutdown": "", "wol": "true"}).encode()
+            r = requests.post(
+                f"http://{self.options.fog.hostname}/fog/host/{hostID}/task", headers=headers, data=payload, timeout=HTTP_TIMEOUT
+            )
+        except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+            raise CuckooMachineError(f"Could not queue FOG's restore of host {hostID}: {e!r}") from e
         if not r.ok:
             # Carrying on would run the next analysis on the dirty system.
             raise CuckooMachineError(f"FOG refused to restore host {hostID}: {r.status_code} {r.text[:200]}")

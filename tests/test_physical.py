@@ -35,18 +35,24 @@ class FakeClock:
 class FakeNetwork:
     """FOG's API and the machines' agents, as seen through requests.get/post."""
 
-    def __init__(self, agent, active_polls=1, deploy_status=200):
+    def __init__(self, agent, active_polls=1, deploy_status=200, deploy_error=None, fog_down=False):
         # One entry per agent /status call: True answers, False is unreachable.
         # The last entry repeats once the list is used up.
         self.agent = list(agent)
         # How many /fog/task/active polls still list the restore task.
         self.active_polls = active_polls
         self.deploy_status = deploy_status
+        # Raised by the restore request instead of answering it.
+        self.deploy_error = deploy_error
+        # Every request to FOG fails to connect.
+        self.fog_down = fog_down
         self.deploys = []
         self.executes = []
 
     def get(self, url, **kwargs):
         assert kwargs.get("timeout"), f"GET {url} has no timeout"
+        if self.fog_down and url.startswith(f"http://{FOG}/"):
+            raise requests.exceptions.ConnectionError(url)
         if url == f"http://{FOG}/fog/host":
             return response(FOG_HOSTS)
         if url == f"http://{FOG}/fog/tasktype":
@@ -65,8 +71,12 @@ class FakeNetwork:
 
     def post(self, url, **kwargs):
         assert kwargs.get("timeout"), f"POST {url} has no timeout"
+        if self.fog_down and url.startswith(f"http://{FOG}/"):
+            raise requests.exceptions.ConnectionError(url)
         if url.startswith(f"http://{FOG}/fog/host/") and url.endswith("/task"):
             self.deploys.append((int(url.split("/")[-2]), json.loads(kwargs["data"])))
+            if self.deploy_error:
+                raise self.deploy_error
             return response({}, self.deploy_status)
         if url.endswith(":8000/execute"):
             self.executes.append((url.split("//")[1].split(":")[0], kwargs["data"]))
@@ -179,6 +189,26 @@ def test_start_accepts_a_restored_machine(physical_module, mocker: MockerFixture
     machinery.start("bm-linux")
 
     assert machinery.unrestored == set()
+
+def test_stop_turns_a_fog_timeout_into_a_machine_error(physical_module, mocker: MockerFixture):
+    network = FakeNetwork(agent=[True], deploy_error=requests.exceptions.ReadTimeout("read timed out"))
+    install(physical_module, mocker, network)
+    machinery = make_machinery(physical_module)
+
+    # Only a machine error lets CAPE keep the analysis's report.
+    with pytest.raises(CuckooMachineError, match="Could not queue FOG's restore of host 7"):
+        machinery.stop("bm-linux")
+    with pytest.raises(CuckooMachineError, match="bm-linux has not been restored since its last analysis"):
+        machinery.start("bm-linux")
+    assert network.executes == []
+
+def test_stop_turns_an_unreachable_fog_into_a_machine_error(physical_module, mocker: MockerFixture):
+    network = FakeNetwork(agent=[True], fog_down=True)
+    install(physical_module, mocker, network)
+
+    with pytest.raises(CuckooMachineError, match="Could not list FOG's hosts"):
+        make_machinery(physical_module).stop("bm-linux")
+    assert network.executes == []
 
 def test_stop_rejects_machines_missing_from_fog(physical_module, mocker: MockerFixture):
     network = FakeNetwork(agent=[True])

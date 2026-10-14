@@ -29,7 +29,6 @@ HTTP_TIMEOUT = 10
 # reboot into the restored system before the machine is reported as broken.
 RESTORE_TIMEOUT = 1800
 
-
 class Physical(Machinery):
     """Manage physical sandboxes."""
 
